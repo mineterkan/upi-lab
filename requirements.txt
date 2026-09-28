@@ -1,0 +1,4 @@
+cryptography==50.0.1
+psycopg==3.3.6
+psycopg-binary==3.3.6
+pytest==9.1.1
