@@ -1,14 +1,19 @@
 """The payment switch: payment requests and payments.
 
-A merchant creates a payment request. A customer pays it. The switch makes
-sure a request is paid at most once, and that retrying a payment never
-charges twice.
+A merchant creates a payment request. A customer pays it by signing the
+payment with their device key. The switch makes sure the signature is valid,
+that a request is paid at most once, and that retrying never charges twice.
 """
 
+import crypto
 import ledger
 
 SCHEMA = """
-DROP TABLE IF EXISTS payments, payment_requests;
+DROP TABLE IF EXISTS payments, payment_requests, device_keys;
+CREATE TABLE device_keys (
+    alias      text PRIMARY KEY,
+    public_key text NOT NULL
+);
 CREATE TABLE payment_requests (
     id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     payee        text NOT NULL,
@@ -22,6 +27,7 @@ CREATE TABLE payments (
     idempotency_key uuid UNIQUE NOT NULL,
     request_id      uuid NOT NULL REFERENCES payment_requests(id),
     payer           text NOT NULL,
+    signature       text NOT NULL,
     transfer_id     bigint,
     created_at      timestamptz NOT NULL DEFAULT now()
 );
@@ -36,13 +42,28 @@ class RequestNotPayable(PaymentError):
     """Unknown, already paid, or expired."""
 
 
+class InvalidSignature(PaymentError):
+    """The payer's device did not sign exactly this payment."""
+
+
 def reset() -> None:
     """Empty ledger and switch tables."""
     with ledger.connect() as conn:
-        conn.execute("DROP TABLE IF EXISTS payments, payment_requests")
+        conn.execute("DROP TABLE IF EXISTS payments, payment_requests, device_keys")
     ledger.reset()
     with ledger.connect() as conn:
         conn.execute(SCHEMA)
+
+
+def register_key(alias: str, public_key: str) -> None:
+    """Bind a device's public key to a customer. A real system would verify
+    the person's identity first (UPI checks the SIM card and bank card)."""
+    with ledger.connect() as conn:
+        conn.execute(
+            "INSERT INTO device_keys (alias, public_key) VALUES (%s, %s) "
+            "ON CONFLICT (alias) DO UPDATE SET public_key = EXCLUDED.public_key",
+            (alias, public_key),
+        )
 
 
 def create_request(
@@ -58,6 +79,23 @@ def create_request(
     return str(row[0])
 
 
+def get_request(request_id: str) -> dict:
+    """What the customer's phone shows before they approve."""
+    with ledger.connect() as conn:
+        row = conn.execute(
+            "SELECT payee, amount_minor, reference FROM payment_requests WHERE id = %s",
+            (request_id,),
+        ).fetchone()
+    if row is None:
+        raise RequestNotPayable("unknown request")
+    return {
+        "id": request_id,
+        "payee": row[0],
+        "amount_minor": row[1],
+        "reference": row[2],
+    }
+
+
 def request_status(request_id: str) -> str:
     with ledger.connect() as conn:
         row = conn.execute(
@@ -70,18 +108,40 @@ def request_status(request_id: str) -> str:
     return "EXPIRED" if status == "PENDING" and expired else status
 
 
-def pay(request_id: str, payer: str, idempotency_key: str) -> dict:
-    """Pay a request. Calling again with the same idempotency_key returns the
-    first result instead of paying again."""
+def pay(request_id: str, payer: str, idempotency_key: str, signature: str) -> dict:
+    """Pay a request with a signature from the payer's device. Calling again
+    with the same idempotency_key returns the first result instead of paying again."""
     with ledger.connect() as conn:
         with conn.transaction():
-            # 1. Record this attempt. If the key already exists, this is a retry.
-            #    A concurrent insert with the same key waits here until the
-            #    first one commits, then finds it.
+            # 1. Consent. Rebuild the instruction from the switch's own record of
+            #    the request, so the customer must have signed the real payee and
+            #    amount, and check it against the payer's registered key.
+            request = conn.execute(
+                "SELECT payee, amount_minor FROM payment_requests WHERE id = %s",
+                (request_id,),
+            ).fetchone()
+            if request is None:
+                raise RequestNotPayable("unknown request")
+            key_row = conn.execute(
+                "SELECT public_key FROM device_keys WHERE alias = %s", (payer,)
+            ).fetchone()
+            message = crypto.instruction_message(
+                {
+                    "request_id": request_id,
+                    "payer": payer,
+                    "payee": request[0],
+                    "amount_minor": request[1],
+                    "idempotency_key": idempotency_key,
+                }
+            )
+            if key_row is None or not crypto.verify(key_row[0], message, signature):
+                raise InvalidSignature(payer)
+
+            # 2. Record this attempt. If the key already exists, this is a retry.
             inserted = conn.execute(
-                "INSERT INTO payments (idempotency_key, request_id, payer) VALUES (%s, %s, %s) "
-                "ON CONFLICT (idempotency_key) DO NOTHING RETURNING id",
-                (idempotency_key, request_id, payer),
+                "INSERT INTO payments (idempotency_key, request_id, payer, signature) "
+                "VALUES (%s, %s, %s, %s) ON CONFLICT (idempotency_key) DO NOTHING RETURNING id",
+                (idempotency_key, request_id, payer, signature),
             ).fetchone()
             if inserted is None:
                 payment_id, first_request, transfer_id = conn.execute(
@@ -99,8 +159,7 @@ def pay(request_id: str, payer: str, idempotency_key: str) -> dict:
                 }
             payment_id = inserted[0]
 
-            # 2. Claim the request. Only one transaction can move it from
-            #    PENDING to PAID; everyone else gets no row back.
+            # 3. Claim the request. Only one transaction can move it from PENDING to PAID.
             claimed = conn.execute(
                 "UPDATE payment_requests SET status = 'PAID' "
                 "WHERE id = %s AND status = 'PENDING' AND expires_at > now() "
@@ -111,8 +170,7 @@ def pay(request_id: str, payer: str, idempotency_key: str) -> dict:
                 raise RequestNotPayable(request_id)
             payee, amount_minor = claimed
 
-            # 3. Move the money in the SAME transaction. If this fails, the claim
-            #    and the payment record are rolled back too.
+            # 4. Move the money in the same transaction.
             transfer_id = ledger.transfer_in(conn, payer, payee, amount_minor)
             conn.execute(
                 "UPDATE payments SET transfer_id = %s WHERE id = %s",
