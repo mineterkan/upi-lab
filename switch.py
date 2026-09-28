@@ -1,0 +1,121 @@
+"""The payment switch: payment requests and payments.
+
+A merchant creates a payment request. A customer pays it. The switch makes
+sure a request is paid at most once, and that retrying a payment never
+charges twice.
+"""
+
+import ledger
+
+SCHEMA = """
+DROP TABLE IF EXISTS payments, payment_requests;
+CREATE TABLE payment_requests (
+    id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    payee        text NOT NULL,
+    amount_minor bigint NOT NULL CHECK (amount_minor > 0),
+    reference    text NOT NULL DEFAULT '',
+    status       text NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'PAID')),
+    expires_at   timestamptz NOT NULL
+);
+CREATE TABLE payments (
+    id              bigserial PRIMARY KEY,
+    idempotency_key uuid UNIQUE NOT NULL,
+    request_id      uuid NOT NULL REFERENCES payment_requests(id),
+    payer           text NOT NULL,
+    transfer_id     bigint,
+    created_at      timestamptz NOT NULL DEFAULT now()
+);
+"""
+
+
+class PaymentError(Exception):
+    pass
+
+
+class RequestNotPayable(PaymentError):
+    """Unknown, already paid, or expired."""
+
+
+def reset() -> None:
+    """Empty ledger and switch tables."""
+    with ledger.connect() as conn:
+        conn.execute("DROP TABLE IF EXISTS payments, payment_requests")
+    ledger.reset()
+    with ledger.connect() as conn:
+        conn.execute(SCHEMA)
+
+
+def create_request(
+    payee: str, amount_minor: int, reference: str = "", ttl_seconds: int = 300
+) -> str:
+    """The merchant asks to be paid. Returns the request id."""
+    with ledger.connect() as conn:
+        row = conn.execute(
+            "INSERT INTO payment_requests (payee, amount_minor, reference, expires_at) "
+            "VALUES (%s, %s, %s, now() + make_interval(secs => %s)) RETURNING id",
+            (payee, amount_minor, reference, ttl_seconds),
+        ).fetchone()
+    return str(row[0])
+
+
+def request_status(request_id: str) -> str:
+    with ledger.connect() as conn:
+        row = conn.execute(
+            "SELECT status, expires_at <= now() FROM payment_requests WHERE id = %s",
+            (request_id,),
+        ).fetchone()
+    if row is None:
+        raise RequestNotPayable("unknown request")
+    status, expired = row
+    return "EXPIRED" if status == "PENDING" and expired else status
+
+
+def pay(request_id: str, payer: str, idempotency_key: str) -> dict:
+    """Pay a request. Calling again with the same idempotency_key returns the
+    first result instead of paying again."""
+    with ledger.connect() as conn:
+        with conn.transaction():
+            # 1. Record this attempt. If the key already exists, this is a retry.
+            #    A concurrent insert with the same key waits here until the
+            #    first one commits, then finds it.
+            inserted = conn.execute(
+                "INSERT INTO payments (idempotency_key, request_id, payer) VALUES (%s, %s, %s) "
+                "ON CONFLICT (idempotency_key) DO NOTHING RETURNING id",
+                (idempotency_key, request_id, payer),
+            ).fetchone()
+            if inserted is None:
+                payment_id, first_request, transfer_id = conn.execute(
+                    "SELECT id, request_id, transfer_id FROM payments WHERE idempotency_key = %s",
+                    (idempotency_key,),
+                ).fetchone()
+                if str(first_request) != request_id:
+                    raise PaymentError(
+                        "idempotency key already used for another request"
+                    )
+                return {
+                    "payment_id": payment_id,
+                    "transfer_id": transfer_id,
+                    "replayed": True,
+                }
+            payment_id = inserted[0]
+
+            # 2. Claim the request. Only one transaction can move it from
+            #    PENDING to PAID; everyone else gets no row back.
+            claimed = conn.execute(
+                "UPDATE payment_requests SET status = 'PAID' "
+                "WHERE id = %s AND status = 'PENDING' AND expires_at > now() "
+                "RETURNING payee, amount_minor",
+                (request_id,),
+            ).fetchone()
+            if claimed is None:
+                raise RequestNotPayable(request_id)
+            payee, amount_minor = claimed
+
+            # 3. Move the money in the SAME transaction. If this fails, the claim
+            #    and the payment record are rolled back too.
+            transfer_id = ledger.transfer_in(conn, payer, payee, amount_minor)
+            conn.execute(
+                "UPDATE payments SET transfer_id = %s WHERE id = %s",
+                (transfer_id, payment_id),
+            )
+    return {"payment_id": payment_id, "transfer_id": transfer_id, "replayed": False}
