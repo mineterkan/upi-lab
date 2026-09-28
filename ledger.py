@@ -61,36 +61,47 @@ def balance(account: str) -> int:
 
 
 def transfer(src: str, dst: str, amount_minor: int) -> int:
-    """Move money from src to dst. All or nothing. Returns the transfer id."""
+    """Move money from src to dst in its own transaction. Returns the transfer id."""
+    with connect() as conn:
+        with conn.transaction():
+            return transfer_in(conn, src, dst, amount_minor)
+
+
+def transfer_in(conn: psycopg.Connection, src: str, dst: str, amount_minor: int) -> int:
+    """Move money inside a transaction the caller has already opened.
+
+    The caller decides when to commit, so the transfer can be combined with
+    other changes (like marking a payment request as paid) into one atomic unit.
+    """
     if amount_minor <= 0:
         raise ValueError("amount must be positive")
     if src == dst:
         raise ValueError("cannot pay yourself")
 
-    with connect() as conn:
-        with conn.transaction():
-            locked = conn.execute(
-                "SELECT id FROM accounts WHERE id = ANY(%s) ORDER BY id FOR UPDATE",
-                ([src, dst],),
-            ).fetchall()
-            if len(locked) != 2:
-                raise UnknownAccount(f"{src} or {dst}")
+    # 1. Lock both account rows, always in the same order.
+    locked = conn.execute(
+        "SELECT id FROM accounts WHERE id = ANY(%s) ORDER BY id FOR UPDATE",
+        ([src, dst],),
+    ).fetchall()
+    if len(locked) != 2:
+        raise UnknownAccount(f"{src} or {dst}")
 
-            debited = conn.execute(
-                "UPDATE accounts SET balance_minor = balance_minor - %s "
-                "WHERE id = %s AND balance_minor >= %s RETURNING balance_minor",
-                (amount_minor, src, amount_minor),
-            ).fetchone()
-            if debited is None:
-                raise InsufficientFunds(src)
+    # 2. Check and subtract in ONE statement.
+    debited = conn.execute(
+        "UPDATE accounts SET balance_minor = balance_minor - %s "
+        "WHERE id = %s AND balance_minor >= %s RETURNING balance_minor",
+        (amount_minor, src, amount_minor),
+    ).fetchone()
+    if debited is None:
+        raise InsufficientFunds(src)
 
-            conn.execute(
-                "UPDATE accounts SET balance_minor = balance_minor + %s WHERE id = %s",
-                (amount_minor, dst),
-            )
-            transfer_id = conn.execute(
-                "INSERT INTO transfers (src, dst, amount_minor) "
-                "VALUES (%s, %s, %s) RETURNING id",
-                (src, dst, amount_minor),
-            ).fetchone()[0]
-    return transfer_id
+    # 3. Add to the receiver and record the history.
+    conn.execute(
+        "UPDATE accounts SET balance_minor = balance_minor + %s WHERE id = %s",
+        (amount_minor, dst),
+    )
+    return conn.execute(
+        "INSERT INTO transfers (src, dst, amount_minor) "
+        "VALUES (%s, %s, %s) RETURNING id",
+        (src, dst, amount_minor),
+    ).fetchone()[0]
