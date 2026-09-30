@@ -1,228 +1,206 @@
 <!doctype html>
 <html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Customer wallet</title>
-    <link rel="stylesheet" href="/style.css" />
-    <script src="https://cdn.jsdelivr.net/npm/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
-  </head>
-  <body>
-    <main>
-      <nav><a href="/merchant.html">Merchant terminal</a></nav>
-      <h1>Customer wallet</h1>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Customer wallet</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="https://cdn.jsdelivr.net/npm/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+</head>
+<body>
+<main>
+  <nav><a href="/merchant.html">Merchant terminal</a></nav>
+  <h1>Customer wallet</h1>
 
-      <section class="card">
-        <label for="payer">I am</label>
-        <select id="payer">
-          <option>anna@lab</option>
-          <option>ben@lab</option>
-        </select>
-        <p class="muted" id="keyInfo"></p>
-        <button class="secondary" id="register">Create device key</button>
-        <div class="big" id="balance">-</div>
-      </section>
+  <section class="card">
+    <label for="payer">I am</label>
+    <select id="payer">
+      <option>anna@lab</option>
+      <option>ben@lab</option>
+    </select>
+    <p class="muted" id="keyInfo"></p>
+    <button class="secondary" id="register">Create device key</button>
+    <div class="big" id="balance">-</div>
+    <p class="muted" id="balanceLedger"></p>
+  </section>
 
-      <section class="card">
-        <button class="secondary" id="scan">Scan QR code</button>
-        <div id="reader"></div>
-        <label for="uri">Or paste the payment link</label>
-        <textarea id="uri" rows="2" placeholder="upilab://pay?..."></textarea>
-        <p id="error" class="EXPIRED"></p>
-      </section>
+  <section class="card">
+    <button class="secondary" id="scan">Scan QR code</button>
+    <div id="reader"></div>
+    <label for="uri">Or paste the payment link</label>
+    <textarea id="uri" rows="2" placeholder="upilab://pay?..."></textarea>
+    <p id="error" class="EXPIRED"></p>
+  </section>
 
-      <section class="card hidden" id="confirmCard">
-        <div class="muted">Pay</div>
-        <div class="big" id="amount"></div>
-        <p>to <b id="payee"></b>, reference <span id="reference"></span></p>
-        <button id="pay">Approve and pay</button>
-        <p id="result"></p>
-        <p class="mono" id="signed"></p>
-      </section>
-    </main>
+  <section class="card hidden" id="confirmCard">
+    <div class="muted">Pay</div>
+    <div class="big" id="amount"></div>
+    <p>to <b id="payee"></b>, reference <span id="reference"></span></p>
+    <button id="pay">Approve and pay</button>
+    <p id="result"></p>
+    <p class="mono" id="signed"></p>
+  </section>
+</main>
 
-    <script>
-      const $ = (id) => document.getElementById(id);
-      let request = null;
+<script>
+const $ = (id) => document.getElementById(id);
+let request = null;
 
-      async function api(path, options = {}) {
-        const response = await fetch(path, {
-          method: options.method || "GET",
-          headers: { "content-type": "application/json" },
-          body: options.body ? JSON.stringify(options.body) : undefined,
-        });
-        const data = await response.json();
-        if (!response.ok) throw new Error(data.detail || response.status);
-        return data;
-      }
+async function api(path, options = {}) {
+  const response = await fetch(path, {
+    method: options.method || "GET",
+    headers: { "content-type": "application/json" },
+    body: options.body ? JSON.stringify(options.body) : undefined,
+  });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.detail || response.status);
+  return data;
+}
 
-      // --- the device key ------------------------------------------------------------
-      // Created by the browser. The private key is "non-extractable": JavaScript can
-      // ask the browser to sign with it, but can never read it out. It is kept in
-      // IndexedDB, the browser's built-in database, one key per customer alias.
+// --- the device key ------------------------------------------------------------
+// Created by the browser. The private key is "non-extractable": JavaScript can
+// ask the browser to sign with it, but can never read it out. It is kept in
+// IndexedDB, the browser's built-in database, one key per customer alias.
 
-      function keyStore(mode) {
-        return new Promise((resolve, reject) => {
-          const open = indexedDB.open("upilab-wallet", 1);
-          open.onupgradeneeded = () => open.result.createObjectStore("keys");
-          open.onsuccess = () =>
-            resolve(open.result.transaction("keys", mode).objectStore("keys"));
-          open.onerror = () => reject(open.error);
-        });
-      }
+function keyStore(mode) {
+  return new Promise((resolve, reject) => {
+    const open = indexedDB.open("upilab-wallet", 1);
+    open.onupgradeneeded = () => open.result.createObjectStore("keys");
+    open.onsuccess = () => resolve(open.result.transaction("keys", mode).objectStore("keys"));
+    open.onerror = () => reject(open.error);
+  });
+}
 
-      async function loadKey(alias) {
-        const store = await keyStore("readonly");
-        return new Promise((resolve) => {
-          const get = store.get(alias);
-          get.onsuccess = () => resolve(get.result);
-        });
-      }
+async function loadKey(alias) {
+  const store = await keyStore("readonly");
+  return new Promise((resolve) => {
+    const get = store.get(alias);
+    get.onsuccess = () => resolve(get.result);
+  });
+}
 
-      async function saveKey(alias, key) {
-        const store = await keyStore("readwrite");
-        store.put(key, alias);
-      }
+async function saveKey(alias, key) {
+  const store = await keyStore("readwrite");
+  store.put(key, alias);
+}
 
-      // Standard base64 with - and _ instead of + and /, same as Python's urlsafe_b64encode.
-      function base64url(bytes) {
-        let text = "";
-        new Uint8Array(bytes).forEach((b) => (text += String.fromCharCode(b)));
-        return btoa(text).replace(/\+/g, "-").replace(/\//g, "_");
-      }
+// Standard base64 with - and _ instead of + and /, same as Python's urlsafe_b64encode.
+function base64url(bytes) {
+  let text = "";
+  new Uint8Array(bytes).forEach((b) => (text += String.fromCharCode(b)));
+  return btoa(text).replace(/\+/g, "-").replace(/\//g, "_");
+}
 
-      $("register").onclick = async () => {
-        const alias = $("payer").value;
-        const pair = await crypto.subtle.generateKey(
-          { name: "Ed25519" },
-          false,
-          ["sign", "verify"],
-        );
-        const publicRaw = await crypto.subtle.exportKey("raw", pair.publicKey);
-        await saveKey(alias, {
-          privateKey: pair.privateKey,
-          publicKey: base64url(publicRaw),
-        });
-        await api(`/api/customers/${alias}/key`, {
-          method: "POST",
-          body: { public_key: base64url(publicRaw) },
-        });
-        showIdentity();
-      };
+$("register").onclick = async () => {
+  const alias = $("payer").value;
+  const pair = await crypto.subtle.generateKey({ name: "Ed25519" }, false, ["sign", "verify"]);
+  const publicRaw = await crypto.subtle.exportKey("raw", pair.publicKey);
+  await saveKey(alias, { privateKey: pair.privateKey, publicKey: base64url(publicRaw) });
+  await api(`/api/customers/${alias}/key`, { method: "POST", body: { public_key: base64url(publicRaw) } });
+  showIdentity();
+};
 
-      async function showIdentity() {
-        const alias = $("payer").value;
-        const key = await loadKey(alias);
-        $("keyInfo").textContent = key
-          ? "Device key: " + key.publicKey.slice(0, 16) + "..."
-          : "No key on this device yet.";
-        const account = await api(`/api/accounts/${alias}`);
-        $("balance").textContent = account.balance + " SEK";
-      }
-      $("payer").onchange = showIdentity;
+async function showIdentity() {
+  const alias = $("payer").value;
+  const key = await loadKey(alias);
+  $("keyInfo").textContent = key
+    ? "Device key: " + key.publicKey.slice(0, 16) + "..."
+    : "No key on this device yet.";
+  const ledgerName = request ? request.ledger : "plain";
+  const account = await api(`/api/accounts/${alias}?ledger=${ledgerName}`);
+  $("balance").textContent = account.balance + " SEK";
+  $("balanceLedger").textContent = "on the " + ledgerName + " ledger";
+}
+$("payer").onchange = showIdentity;
 
-      // --- reading the payment request -------------------------------------------------
+// --- reading the payment request -------------------------------------------------
 
-      $("uri").oninput = () => loadRequest($("uri").value.trim());
+$("uri").oninput = () => loadRequest($("uri").value.trim());
 
-      $("scan").onclick = () => {
-        const scanner = new Html5Qrcode("reader");
-        scanner
-          .start(
-            { facingMode: "environment" },
-            { fps: 10, qrbox: 220 },
-            async (text) => {
-              await scanner.stop();
-              $("uri").value = text;
-              loadRequest(text);
-            },
-          )
-          .catch((e) => ($("error").textContent = "Camera: " + e));
-      };
+$("scan").onclick = () => {
+  const scanner = new Html5Qrcode("reader");
+  scanner.start({ facingMode: "environment" }, { fps: 10, qrbox: 220 }, async (text) => {
+    await scanner.stop();
+    $("uri").value = text;
+    loadRequest(text);
+  }).catch((e) => ($("error").textContent = "Camera: " + e));
+};
 
-      async function loadRequest(text) {
-        $("error").textContent = "";
-        $("result").textContent = "";
-        const params = new URL(text).searchParams;
-        try {
-          request = await api(`/api/payment-requests/${params.get("tr")}`);
-        } catch (e) {
-          $("error").textContent = e.message;
-          return;
-        }
-        // Trust the switch's record, not the QR code: a sticker can be swapped.
-        const mismatch =
-          params.get("pa") !== request.payee ||
-          params.get("am") !== request.amount;
-        $("confirmCard").classList.remove("hidden");
-        $("amount").textContent = request.amount + " SEK";
-        $("payee").textContent = request.payee;
-        $("reference").textContent = request.reference || "-";
-        $("pay").disabled = mismatch || request.status !== "PENDING";
-        if (mismatch)
-          $("error").textContent =
-            "The QR code does not match the switch. Do not pay.";
-        else if (request.status !== "PENDING")
-          $("error").textContent = "This request is " + request.status + ".";
-      }
+async function loadRequest(text) {
+  $("error").textContent = "";
+  $("result").textContent = "";
+  const params = new URL(text).searchParams;
+  try {
+    request = await api(`/api/payment-requests/${params.get("tr")}`);
+  } catch (e) {
+    $("error").textContent = e.message;
+    return;
+  }
+  // Trust the switch's record, not the QR code: a sticker can be swapped.
+  const mismatch = params.get("pa") !== request.payee || params.get("am") !== request.amount;
+  $("confirmCard").classList.remove("hidden");
+  $("amount").textContent = request.amount + " SEK";
+  $("payee").textContent = request.payee;
+  $("reference").textContent = request.reference || "-";
+  showIdentity();
+  $("pay").disabled = mismatch || request.status !== "PENDING";
+  if (mismatch) $("error").textContent = "The QR code does not match the switch. Do not pay.";
+  else if (request.status !== "PENDING") $("error").textContent = "This request is " + request.status + ".";
+}
 
-      // --- paying ------------------------------------------------------------------------
+// --- paying ------------------------------------------------------------------------
 
-      // Must produce exactly the same text as crypto.instruction_message in Python.
-      function instructionMessage(i) {
-        return [
-          "UPILAB-PAY-v1",
-          `request_id=${i.request_id}`,
-          `payer=${i.payer}`,
-          `payee=${i.payee}`,
-          `amount_minor=${i.amount_minor}`,
-          `idempotency_key=${i.idempotency_key}`,
-        ].join("\n");
-      }
+// Must produce exactly the same text as crypto.instruction_message in Python.
+function instructionMessage(i) {
+  return [
+    "UPILAB-PAY-v1",
+    `request_id=${i.request_id}`,
+    `payer=${i.payer}`,
+    `payee=${i.payee}`,
+    `amount_minor=${i.amount_minor}`,
+    `idempotency_key=${i.idempotency_key}`,
+  ].join("\n");
+}
 
-      $("pay").onclick = async () => {
-        const alias = $("payer").value;
-        const key = await loadKey(alias);
-        if (!key) {
-          $("error").textContent = "Create a device key first.";
-          return;
-        }
-        const instruction = {
-          request_id: request.id,
-          payer: alias,
-          payee: request.payee,
-          amount_minor: request.amount_minor,
-          idempotency_key: crypto.randomUUID(),
-        };
-        const message = instructionMessage(instruction);
-        const signature = await crypto.subtle.sign(
-          { name: "Ed25519" },
-          key.privateKey,
-          new TextEncoder().encode(message),
-        );
-        $("signed").textContent = message;
-        $("pay").disabled = true;
-        try {
-          await api("/api/payments", {
-            method: "POST",
-            body: {
-              request_id: instruction.request_id,
-              payer: alias,
-              idempotency_key: instruction.idempotency_key,
-              signature: base64url(signature),
-            },
-          });
-          $("result").textContent = "Paid";
-          $("result").className = "SUCCESS";
-        } catch (e) {
-          $("result").textContent = e.message;
-          $("result").className = "ERROR";
-          $("pay").disabled = false;
-        }
-        showIdentity();
-      };
+$("pay").onclick = async () => {
+  const alias = $("payer").value;
+  const key = await loadKey(alias);
+  if (!key) {
+    $("error").textContent = "Create a device key first.";
+    return;
+  }
+  const instruction = {
+    request_id: request.id,
+    payer: alias,
+    payee: request.payee,
+    amount_minor: request.amount_minor,
+    idempotency_key: crypto.randomUUID(),
+  };
+  const message = instructionMessage(instruction);
+  const signature = await crypto.subtle.sign({ name: "Ed25519" }, key.privateKey, new TextEncoder().encode(message));
+  $("signed").textContent = message;
+  $("pay").disabled = true;
+  try {
+    await api("/api/payments", {
+      method: "POST",
+      body: {
+        request_id: instruction.request_id,
+        payer: alias,
+        idempotency_key: instruction.idempotency_key,
+        signature: base64url(signature),
+      },
+    });
+    $("result").textContent = "Paid";
+    $("result").className = "SUCCESS";
+  } catch (e) {
+    $("result").textContent = e.message;
+    $("result").className = "ERROR";
+    $("pay").disabled = false;
+  }
+  showIdentity();
+};
 
-      showIdentity();
-    </script>
-  </body>
+showIdentity();
+</script>
+</body>
 </html>

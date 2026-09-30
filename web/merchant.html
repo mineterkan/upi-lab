@@ -1,100 +1,107 @@
 <!doctype html>
 <html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Merchant terminal</title>
-    <link rel="stylesheet" href="/style.css" />
-  </head>
-  <body>
-    <main>
-      <nav><a href="/customer.html">Customer wallet</a></nav>
-      <h1>Merchant terminal</h1>
-      <p class="muted">Kafe Lab (cafe@lab)</p>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Merchant terminal</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<main>
+  <nav><a href="/customer.html">Customer wallet</a></nav>
+  <h1>Merchant terminal</h1>
+  <p class="muted">Kafe Lab (cafe@lab)</p>
 
-      <section class="card">
-        <label for="amount">Amount (SEK)</label>
-        <input id="amount" value="45.50" inputmode="decimal" />
-        <label for="reference">Order reference</label>
-        <input id="reference" value="order-1" />
-        <button id="create">Create payment request</button>
-        <p id="error" class="EXPIRED"></p>
-      </section>
+  <section class="card">
+    <label for="ledger">Ledger</label>
+    <select id="ledger">
+      <option value="plain">PostgreSQL</option>
+      <option value="chained">PostgreSQL + hash chain</option>
+    </select>
+    <label for="amount">Amount (SEK)</label>
+    <input id="amount" value="45.50" inputmode="decimal">
+    <label for="reference">Order reference</label>
+    <input id="reference" value="order-1">
+    <button id="create">Create payment request</button>
+    <p id="error" class="EXPIRED"></p>
+  </section>
 
-      <section class="card hidden" id="requestCard">
-        <div class="big" id="showAmount"></div>
-        <p>Status: <span id="status"></span></p>
-        <img class="qr" id="qr" alt="Payment QR code" />
-        <p class="mono" id="uri"></p>
-      </section>
+  <section class="card hidden" id="requestCard">
+    <div class="big" id="showAmount"></div>
+    <p>Status: <span id="status"></span></p>
+    <img class="qr" id="qr" alt="Payment QR code">
+    <p class="mono" id="uri"></p>
+  </section>
 
-      <section class="card">
-        <div class="muted">Merchant balance</div>
-        <div class="big" id="balance">-</div>
-      </section>
-    </main>
+  <section class="card">
+    <div class="muted">Merchant balance</div>
+    <div class="big" id="balance">-</div>
+  </section>
+</main>
 
-    <script>
-      const $ = (id) => document.getElementById(id);
-      let requestId = null;
-      let timer = null;
+<script>
+const $ = (id) => document.getElementById(id);
+let requestId = null;
+let timer = null;
 
-      async function api(path, options = {}) {
-        const response = await fetch(path, {
-          method: options.method || "GET",
-          headers: { "content-type": "application/json" },
-          body: options.body ? JSON.stringify(options.body) : undefined,
-        });
-        const data = await response.json();
-        if (!response.ok) throw new Error(data.detail || response.status);
-        return data;
-      }
+async function api(path, options = {}) {
+  const response = await fetch(path, {
+    method: options.method || "GET",
+    headers: { "content-type": "application/json" },
+    body: options.body ? JSON.stringify(options.body) : undefined,
+  });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.detail || response.status);
+  return data;
+}
 
-      async function refreshBalance() {
-        const account = await api("/api/accounts/cafe@lab");
-        $("balance").textContent = account.balance + " SEK";
-      }
+async function refreshBalance() {
+  const account = await api(`/api/accounts/cafe@lab?ledger=${$("ledger").value}`);
+  $("balance").textContent = account.balance + " SEK";
+}
 
-      $("create").onclick = async () => {
-        $("error").textContent = "";
-        try {
-          const request = await api("/api/payment-requests", {
-            method: "POST",
-            body: {
-              payee: "cafe@lab",
-              amount: $("amount").value,
-              reference: $("reference").value,
-            },
-          });
-          requestId = request.id;
-          $("requestCard").classList.remove("hidden");
-          $("showAmount").textContent = request.amount + " SEK";
-          $("qr").src = `/api/payment-requests/${request.id}/qr.svg`;
-          $("uri").textContent = request.uri;
-          showStatus(request.status);
-          clearInterval(timer);
-          timer = setInterval(poll, 1000);
-        } catch (e) {
-          $("error").textContent = e.message;
-        }
-      };
+$("create").onclick = async () => {
+  $("error").textContent = "";
+  try {
+    const request = await api("/api/payment-requests", {
+      method: "POST",
+      body: {
+        payee: "cafe@lab",
+        amount: $("amount").value,
+        reference: $("reference").value,
+        ledger: $("ledger").value,
+      },
+    });
+    requestId = request.id;
+    $("requestCard").classList.remove("hidden");
+    $("showAmount").textContent = request.amount + " SEK";
+    $("qr").src = `/api/payment-requests/${request.id}/qr.svg`;
+    $("uri").textContent = request.uri;
+    showStatus(request.status);
+    clearInterval(timer);
+    timer = setInterval(poll, 1000);
+  } catch (e) {
+    $("error").textContent = e.message;
+  }
+};
 
-      // Ask the server once a second whether the request has been paid.
-      async function poll() {
-        const request = await api(`/api/payment-requests/${requestId}`);
-        showStatus(request.status);
-        if (request.status !== "PENDING") {
-          clearInterval(timer);
-          refreshBalance();
-        }
-      }
+// Ask the server once a second whether the request has been paid.
+async function poll() {
+  const request = await api(`/api/payment-requests/${requestId}`);
+  showStatus(request.status);
+  if (request.status !== "PENDING") {
+    clearInterval(timer);
+    refreshBalance();
+  }
+}
 
-      function showStatus(status) {
-        $("status").textContent = status;
-        $("status").className = status;
-      }
+function showStatus(status) {
+  $("status").textContent = status;
+  $("status").className = status;
+}
 
-      refreshBalance();
-    </script>
-  </body>
+$("ledger").onchange = refreshBalance;
+refreshBalance();
+</script>
+</body>
 </html>

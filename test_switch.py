@@ -3,6 +3,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
+import chain
 import crypto
 import ledger
 import switch
@@ -18,17 +19,13 @@ class Customer:
 
     def sign(self, request_id: str, key: str, amount_minor: int | None = None) -> str:
         request = switch.get_request(request_id)
-        message = crypto.instruction_message(
-            {
-                "request_id": request_id,
-                "payer": self.alias,
-                "payee": request["payee"],
-                "amount_minor": request["amount_minor"]
-                if amount_minor is None
-                else amount_minor,
-                "idempotency_key": key,
-            }
-        )
+        message = crypto.instruction_message({
+            "request_id": request_id,
+            "payer": self.alias,
+            "payee": request["payee"],
+            "amount_minor": request["amount_minor"] if amount_minor is None else amount_minor,
+            "idempotency_key": key,
+        })
         return self.device.sign(message)
 
     def pay(self, request_id: str, key: str | None = None) -> dict:
@@ -49,9 +46,9 @@ def ben():
 @pytest.fixture(autouse=True)
 def fresh_database():
     switch.reset()
-    ledger.open_account("anna@lab", 100_00)
-    ledger.open_account("ben@lab", 100_00)
-    ledger.open_account("cafe@lab", 0)
+    switch.open_account("anna@lab", 100_00)
+    switch.open_account("ben@lab", 100_00)
+    switch.open_account("cafe@lab", 0)
 
 
 def new_key() -> str:
@@ -113,11 +110,7 @@ def test_retry_storm_charges_once(anna):
     key = new_key()
     signature = anna.sign(request_id, key)
     with ThreadPoolExecutor(max_workers=20) as pool:
-        results = list(
-            pool.map(
-                lambda _: switch.pay(request_id, "anna@lab", key, signature), range(20)
-            )
-        )
+        results = list(pool.map(lambda _: switch.pay(request_id, "anna@lab", key, signature), range(20)))
     assert len({r["payment_id"] for r in results}) == 1
     assert ledger.balance("anna@lab") == 93_00
 
@@ -141,7 +134,6 @@ def test_twenty_attempts_one_request(anna):
 
 # --- signatures ---------------------------------------------------------------
 
-
 def test_someone_else_cannot_pay_from_annas_account(anna, ben):
     """Ben signs with his own key but claims to be Anna."""
     request_id = switch.create_request("cafe@lab", 10_00)
@@ -155,15 +147,10 @@ def test_customer_without_registered_key_cannot_pay():
     request_id = switch.create_request("cafe@lab", 10_00)
     stranger = crypto.DeviceKey()  # never registered
     key = new_key()
-    message = crypto.instruction_message(
-        {
-            "request_id": request_id,
-            "payer": "anna@lab",
-            "payee": "cafe@lab",
-            "amount_minor": 10_00,
-            "idempotency_key": key,
-        }
-    )
+    message = crypto.instruction_message({
+        "request_id": request_id, "payer": "anna@lab", "payee": "cafe@lab",
+        "amount_minor": 10_00, "idempotency_key": key,
+    })
     with pytest.raises(switch.InvalidSignature):
         switch.pay(request_id, "anna@lab", key, stranger.sign(message))
 
@@ -173,9 +160,7 @@ def test_signature_must_cover_the_real_amount(anna):
     request_id = switch.create_request("cafe@lab", 10_00)
     key = new_key()
     with pytest.raises(switch.InvalidSignature):
-        switch.pay(
-            request_id, "anna@lab", key, anna.sign(request_id, key, amount_minor=1)
-        )
+        switch.pay(request_id, "anna@lab", key, anna.sign(request_id, key, amount_minor=1))
 
 
 def test_signature_cannot_be_replayed_with_a_new_key(anna):
@@ -185,3 +170,18 @@ def test_signature_cannot_be_replayed_with_a_new_key(anna):
     signature = anna.sign(request_id, key)
     with pytest.raises(switch.InvalidSignature):
         switch.pay(request_id, "anna@lab", new_key(), signature)
+
+
+# --- choosing a ledger -------------------------------------------------------------
+
+def test_pay_on_the_chained_ledger(anna):
+    request_id = switch.create_request("cafe@lab", 45_50, ledger_name="chained")
+    anna.pay(request_id)
+    assert chain.balance("anna@lab") == 54_50     # money moved on the chain
+    assert ledger.balance("anna@lab") == 100_00   # the plain ledger is untouched
+    assert chain.verify() == []
+
+
+def test_unknown_ledger_is_rejected():
+    with pytest.raises(ValueError):
+        switch.create_request("cafe@lab", 1_00, ledger_name="blockchain")

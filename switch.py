@@ -6,8 +6,14 @@ that a request is paid at most once, and that retrying never charges twice.
 """
 
 import uuid
+
+import chain
 import crypto
 import ledger
+
+# The ledgers a payment can run on. Both modules offer the same functions
+# (transfer_in, balance, open_account, reset), so the switch can use either.
+LEDGERS = {"plain": ledger, "chained": chain}
 
 SCHEMA = """
 DROP TABLE IF EXISTS payments, payment_requests, device_keys;
@@ -20,6 +26,7 @@ CREATE TABLE payment_requests (
     payee        text NOT NULL,
     amount_minor bigint NOT NULL CHECK (amount_minor > 0),
     reference    text NOT NULL DEFAULT '',
+    ledger       text NOT NULL DEFAULT 'plain' CHECK (ledger IN ('plain', 'chained')),
     status       text NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'PAID')),
     expires_at   timestamptz NOT NULL
 );
@@ -56,8 +63,15 @@ def reset() -> None:
     with ledger.connect() as conn:
         conn.execute("DROP TABLE IF EXISTS payments, payment_requests, device_keys")
     ledger.reset()
+    chain.reset()
     with ledger.connect() as conn:
         conn.execute(SCHEMA)
+
+
+def open_account(alias: str, balance_minor: int) -> None:
+    """Open the same account, with the same balance, on every ledger."""
+    for book in LEDGERS.values():
+        book.open_account(alias, balance_minor)
 
 
 def register_key(alias: str, public_key: str) -> None:
@@ -79,15 +93,16 @@ def check_request_id(request_id: str) -> None:
         raise UnknownRequest(request_id)
 
 
-def create_request(
-    payee: str, amount_minor: int, reference: str = "", ttl_seconds: int = 300
-) -> str:
-    """The merchant asks to be paid. Returns the request id."""
+def create_request(payee: str, amount_minor: int, reference: str = "",
+                   ttl_seconds: int = 300, ledger_name: str = "plain") -> str:
+    """The merchant asks to be paid, on the chosen ledger. Returns the request id."""
+    if ledger_name not in LEDGERS:
+        raise ValueError(f"unknown ledger {ledger_name!r}")
     with ledger.connect() as conn:
         row = conn.execute(
-            "INSERT INTO payment_requests (payee, amount_minor, reference, expires_at) "
-            "VALUES (%s, %s, %s, now() + make_interval(secs => %s)) RETURNING id",
-            (payee, amount_minor, reference, ttl_seconds),
+            "INSERT INTO payment_requests (payee, amount_minor, reference, ledger, expires_at) "
+            "VALUES (%s, %s, %s, %s, now() + make_interval(secs => %s)) RETURNING id",
+            (payee, amount_minor, reference, ledger_name, ttl_seconds),
         ).fetchone()
     return str(row[0])
 
@@ -97,17 +112,13 @@ def get_request(request_id: str) -> dict:
     check_request_id(request_id)
     with ledger.connect() as conn:
         row = conn.execute(
-            "SELECT payee, amount_minor, reference FROM payment_requests WHERE id = %s",
+            "SELECT payee, amount_minor, reference, ledger FROM payment_requests WHERE id = %s",
             (request_id,),
         ).fetchone()
     if row is None:
         raise UnknownRequest(request_id)
-    return {
-        "id": request_id,
-        "payee": row[0],
-        "amount_minor": row[1],
-        "reference": row[2],
-    }
+    return {"id": request_id, "payee": row[0], "amount_minor": row[1],
+            "reference": row[2], "ledger": row[3]}
 
 
 def request_status(request_id: str) -> str:
@@ -133,23 +144,17 @@ def pay(request_id: str, payer: str, idempotency_key: str, signature: str) -> di
             #    the request, so the customer must have signed the real payee and
             #    amount, and check it against the payer's registered key.
             request = conn.execute(
-                "SELECT payee, amount_minor FROM payment_requests WHERE id = %s",
-                (request_id,),
+                "SELECT payee, amount_minor FROM payment_requests WHERE id = %s", (request_id,)
             ).fetchone()
             if request is None:
                 raise UnknownRequest(request_id)
             key_row = conn.execute(
                 "SELECT public_key FROM device_keys WHERE alias = %s", (payer,)
             ).fetchone()
-            message = crypto.instruction_message(
-                {
-                    "request_id": request_id,
-                    "payer": payer,
-                    "payee": request[0],
-                    "amount_minor": request[1],
-                    "idempotency_key": idempotency_key,
-                }
-            )
+            message = crypto.instruction_message({
+                "request_id": request_id, "payer": payer, "payee": request[0],
+                "amount_minor": request[1], "idempotency_key": idempotency_key,
+            })
             if key_row is None or not crypto.verify(key_row[0], message, signature):
                 raise InvalidSignature(payer)
 
@@ -165,31 +170,22 @@ def pay(request_id: str, payer: str, idempotency_key: str, signature: str) -> di
                     (idempotency_key,),
                 ).fetchone()
                 if str(first_request) != request_id:
-                    raise PaymentError(
-                        "idempotency key already used for another request"
-                    )
-                return {
-                    "payment_id": payment_id,
-                    "transfer_id": transfer_id,
-                    "replayed": True,
-                }
+                    raise PaymentError("idempotency key already used for another request")
+                return {"payment_id": payment_id, "transfer_id": transfer_id, "replayed": True}
             payment_id = inserted[0]
 
             # 3. Claim the request. Only one transaction can move it from PENDING to PAID.
             claimed = conn.execute(
                 "UPDATE payment_requests SET status = 'PAID' "
                 "WHERE id = %s AND status = 'PENDING' AND expires_at > now() "
-                "RETURNING payee, amount_minor",
+                "RETURNING payee, amount_minor, ledger",
                 (request_id,),
             ).fetchone()
             if claimed is None:
                 raise RequestNotPayable(request_id)
-            payee, amount_minor = claimed
+            payee, amount_minor, ledger_name = claimed
 
-            # 4. Move the money in the same transaction.
-            transfer_id = ledger.transfer_in(conn, payer, payee, amount_minor)
-            conn.execute(
-                "UPDATE payments SET transfer_id = %s WHERE id = %s",
-                (transfer_id, payment_id),
-            )
+            # 4. Move the money on the request's ledger, in the same transaction.
+            transfer_id = LEDGERS[ledger_name].transfer_in(conn, payer, payee, amount_minor)
+            conn.execute("UPDATE payments SET transfer_id = %s WHERE id = %s", (transfer_id, payment_id))
     return {"payment_id": payment_id, "transfer_id": transfer_id, "replayed": False}
