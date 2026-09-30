@@ -1,6 +1,11 @@
 cryptography==50.0.1
 fastapi==0.142.1
 httpx==0.28.1
+ipykernel==7.4.0
+matplotlib==3.11.2
+matplotlib-inline==0.2.2
+nbconvert==7.17.1
+pandas==3.0.6
 psycopg==3.3.6
 psycopg-binary==3.3.6
 py-solc-x==2.0.5
