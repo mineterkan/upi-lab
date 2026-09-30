@@ -1,0 +1,5 @@
+label,ledger,payments,p50_ms,p95_ms,mean_ms,parallel_per_second,gas_per_payment
+instant blocks,plain,300,7.38,9.96,7.94,203.0,
+instant blocks,chained,300,8.24,11.67,9.06,231.7,
+instant blocks,contract,300,17.69,32.55,20.76,76.2,58540
+"contract, 1 s blocks",contract,20,983.17,999.51,983.49,6.7,58890
