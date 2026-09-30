@@ -2,3 +2,4 @@
 __pycache__/
 .pystest_cache/
 witness.jsonl
+contract_address.txt
