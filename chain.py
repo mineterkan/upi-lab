@@ -10,8 +10,8 @@ import time
 import ledger
 from ledger import InsufficientFunds, UnknownAccount
 
-MINT = "__mint__"  # where opening balances come from
-GENESIS = "0" * 64  # the "previous hash" of the very first entry
+MINT = "__mint__"      # where opening balances come from
+GENESIS = "0" * 64     # the "previous hash" of the very first entry
 
 SCHEMA = f"""
 DROP TABLE IF EXISTS chain_entries, chain_head, chain_accounts;
@@ -37,9 +37,7 @@ INSERT INTO chain_head VALUES (1, 0, '{GENESIS}');
 """
 
 
-def entry_hash(
-    prev_hash: str, seq: int, src: str, dst: str, amount_minor: int, ts_us: int
-) -> str:
+def entry_hash(prev_hash: str, seq: int, src: str, dst: str, amount_minor: int, ts_us: int) -> str:
     """SHA-256 over the previous hash plus this entry's content."""
     text = f"{prev_hash}|{seq}|{src}|{dst}|{amount_minor}|{ts_us}"
     return hashlib.sha256(text.encode()).hexdigest()
@@ -53,9 +51,7 @@ def reset() -> None:
 def _append(conn, src: str, dst: str, amount_minor: int) -> int:
     """Add one entry at the end of the chain. Caller holds the transaction."""
     # Lock the head: only one writer at a time can extend the chain.
-    seq, prev = conn.execute(
-        "SELECT seq, hash FROM chain_head WHERE id = 1 FOR UPDATE"
-    ).fetchone()
+    seq, prev = conn.execute("SELECT seq, hash FROM chain_head WHERE id = 1 FOR UPDATE").fetchone()
     seq += 1
     ts_us = time.time_ns() // 1000
     h = entry_hash(prev, seq, src, dst, amount_minor, ts_us)
@@ -70,32 +66,29 @@ def _append(conn, src: str, dst: str, amount_minor: int) -> int:
 def open_account(account: str, balance_minor: int) -> None:
     with ledger.connect() as conn:
         with conn.transaction():
-            conn.execute(
-                "INSERT INTO chain_accounts VALUES (%s, %s)", (account, balance_minor)
-            )
+            conn.execute("INSERT INTO chain_accounts VALUES (%s, %s)", (account, balance_minor))
             if balance_minor > 0:
                 _append(conn, MINT, account, balance_minor)
 
 
 def balance(account: str) -> int:
     with ledger.connect() as conn:
-        row = conn.execute(
-            "SELECT balance_minor FROM chain_accounts WHERE id = %s", (account,)
-        ).fetchone()
+        row = conn.execute("SELECT balance_minor FROM chain_accounts WHERE id = %s", (account,)).fetchone()
     if row is None:
         raise UnknownAccount(account)
     return row[0]
 
 
-def transfer_in(conn, src: str, dst: str, amount_minor: int) -> int:
-    """Same rules as ledger.transfer_in, plus a chain entry. Returns its seq."""
+def transfer_in(conn, src: str, dst: str, amount_minor: int,
+                transfer_id: str | None = None) -> int:
+    """Same rules as ledger.transfer_in, plus a chain entry. Returns its seq.
+    transfer_id is accepted for the same reason as in ledger.transfer_in."""
     if amount_minor <= 0:
         raise ValueError("amount must be positive")
     if src == dst:
         raise ValueError("cannot pay yourself")
     locked = conn.execute(
-        "SELECT id FROM chain_accounts WHERE id = ANY(%s) ORDER BY id FOR UPDATE",
-        ([src, dst],),
+        "SELECT id FROM chain_accounts WHERE id = ANY(%s) ORDER BY id FOR UPDATE", ([src, dst],)
     ).fetchall()
     if len(locked) != 2:
         raise UnknownAccount(f"{src} or {dst}")
@@ -107,8 +100,7 @@ def transfer_in(conn, src: str, dst: str, amount_minor: int) -> int:
     if debited is None:
         raise InsufficientFunds(src)
     conn.execute(
-        "UPDATE chain_accounts SET balance_minor = balance_minor + %s WHERE id = %s",
-        (amount_minor, dst),
+        "UPDATE chain_accounts SET balance_minor = balance_minor + %s WHERE id = %s", (amount_minor, dst)
     )
     return _append(conn, src, dst, amount_minor)
 
@@ -129,9 +121,7 @@ def hash_at(seq: int) -> str | None:
     if seq == 0:
         return GENESIS
     with ledger.connect() as conn:
-        row = conn.execute(
-            "SELECT hash FROM chain_entries WHERE seq = %s", (seq,)
-        ).fetchone()
+        row = conn.execute("SELECT hash FROM chain_entries WHERE seq = %s", (seq,)).fetchone()
     return row[0] if row else None
 
 
@@ -141,15 +131,11 @@ def verify() -> list[str]:
         entries = conn.execute(
             "SELECT seq, src, dst, amount_minor, ts_us, prev_hash, hash FROM chain_entries ORDER BY seq"
         ).fetchall()
-        balances = dict(
-            conn.execute("SELECT id, balance_minor FROM chain_accounts").fetchall()
-        )
+        balances = dict(conn.execute("SELECT id, balance_minor FROM chain_accounts").fetchall())
     problems = []
     prev = GENESIS
     replayed = {account: 0 for account in balances}
-    for expected_seq, (seq, src, dst, amount, ts_us, prev_hash, h) in enumerate(
-        entries, start=1
-    ):
+    for expected_seq, (seq, src, dst, amount, ts_us, prev_hash, h) in enumerate(entries, start=1):
         if seq != expected_seq:
             problems.append(f"entry {expected_seq} is missing")
             break
@@ -165,7 +151,5 @@ def verify() -> list[str]:
         problems.append("head does not match the last entry")
     for account, value in balances.items():
         if replayed.get(account, 0) != value:
-            problems.append(
-                f"{account}: history says {replayed.get(account, 0)}, balance says {value}"
-            )
+            problems.append(f"{account}: history says {replayed.get(account, 0)}, balance says {value}")
     return problems

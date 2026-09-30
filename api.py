@@ -10,6 +10,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 import chain
+import contract
 import ledger
 import switch
 import witness
@@ -29,6 +30,7 @@ ERRORS = {
     switch.UnknownRequest: 404,           # checked before its parent class below
     switch.RequestNotPayable: 409,        # Conflict: paid, expired or unknown
     switch.PaymentError: 409,
+    contract.ContractError: 409,          # e.g. the chain already processed this request
     ValueError: 400,                      # Bad Request: e.g. amount "abc"
 }
 
@@ -50,7 +52,7 @@ class RequestIn(BaseModel):
     payee: str
     amount: str          # "45.50", parsed with parse_sek, never a float
     reference: str = ""
-    ledger: str = "plain"  # "plain" or "chained"
+    ledger: str = "plain"  # "plain", "chained" or "contract"
 
 
 class PaymentIn(BaseModel):

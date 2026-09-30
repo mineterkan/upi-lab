@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 
 import chain
+import contract
 import crypto
 import ledger
 import switch
@@ -185,3 +186,26 @@ def test_pay_on_the_chained_ledger(anna):
 def test_unknown_ledger_is_rejected():
     with pytest.raises(ValueError):
         switch.create_request("cafe@lab", 1_00, ledger_name="blockchain")
+
+
+
+def test_pay_on_the_contract_ledger(anna):
+    request_id = switch.create_request("cafe@lab", 45_50, ledger_name="contract")
+    anna.pay(request_id)
+    assert contract.balance("anna@lab") == 54_50  # money moved on the blockchain
+    assert ledger.balance("anna@lab") == 100_00   # the other ledgers are untouched
+    assert switch.request_status(request_id) == "PAID"
+    assert contract.verify() == []
+
+
+def test_chain_refuses_to_pay_a_request_twice_after_a_crash(anna):
+    """The chain moved the money, then the switch crashed before saving that.
+    The request still looks unpaid, so the customer tries again. The contract
+    recognises the request id and refuses, so Anna is not charged twice."""
+    request_id = switch.create_request("cafe@lab", 10_00, ledger_name="contract")
+    contract.transfer_in(None, "anna@lab", "cafe@lab", 10_00, transfer_id=request_id)  # the "lost" first attempt
+    assert switch.request_status(request_id) == "PENDING"
+
+    with pytest.raises(contract.ContractError, match="duplicate transfer"):
+        anna.pay(request_id)
+    assert contract.balance("anna@lab") == 90_00  # charged once, not twice

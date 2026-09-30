@@ -4,9 +4,7 @@ import os
 
 import psycopg
 
-DATABASE_URL = os.getenv(
-    "DATABASE_URL", "postgresql://postgres:postgres@localhost:5433/upilab"
-)
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:postgres@localhost:5433/upilab")
 
 SCHEMA = """
 DROP TABLE IF EXISTS transfers, accounts;
@@ -44,17 +42,12 @@ def reset() -> None:
 
 def open_account(account: str, balance_minor: int) -> None:
     with connect() as conn:
-        conn.execute(
-            "INSERT INTO accounts (id, balance_minor) VALUES (%s, %s)",
-            (account, balance_minor),
-        )
+        conn.execute("INSERT INTO accounts (id, balance_minor) VALUES (%s, %s)", (account, balance_minor))
 
 
 def balance(account: str) -> int:
     with connect() as conn:
-        row = conn.execute(
-            "SELECT balance_minor FROM accounts WHERE id = %s", (account,)
-        ).fetchone()
+        row = conn.execute("SELECT balance_minor FROM accounts WHERE id = %s", (account,)).fetchone()
     if row is None:
         raise UnknownAccount(account)
     return row[0]
@@ -67,11 +60,15 @@ def transfer(src: str, dst: str, amount_minor: int) -> int:
             return transfer_in(conn, src, dst, amount_minor)
 
 
-def transfer_in(conn: psycopg.Connection, src: str, dst: str, amount_minor: int) -> int:
+def transfer_in(conn: psycopg.Connection, src: str, dst: str, amount_minor: int,
+                transfer_id: str | None = None) -> int:
     """Move money inside a transaction the caller has already opened.
 
     The caller decides when to commit, so the transfer can be combined with
     other changes (like marking a payment request as paid) into one atomic unit.
+    transfer_id is not needed here: this ledger commits together with the
+    switch, so it can never run twice for one request. It is accepted so all
+    ledgers can be called the same way.
     """
     if amount_minor <= 0:
         raise ValueError("amount must be positive")

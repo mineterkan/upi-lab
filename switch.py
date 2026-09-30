@@ -8,12 +8,13 @@ that a request is paid at most once, and that retrying never charges twice.
 import uuid
 
 import chain
+import contract
 import crypto
 import ledger
 
-# The ledgers a payment can run on. Both modules offer the same functions
-# (transfer_in, balance, open_account, reset), so the switch can use either.
-LEDGERS = {"plain": ledger, "chained": chain}
+# The ledgers a payment can run on. All three modules offer the same functions
+# (transfer_in, balance, open_account, reset), so the switch can use any of them.
+LEDGERS = {"plain": ledger, "chained": chain, "contract": contract}
 
 SCHEMA = """
 DROP TABLE IF EXISTS payments, payment_requests, device_keys;
@@ -26,7 +27,7 @@ CREATE TABLE payment_requests (
     payee        text NOT NULL,
     amount_minor bigint NOT NULL CHECK (amount_minor > 0),
     reference    text NOT NULL DEFAULT '',
-    ledger       text NOT NULL DEFAULT 'plain' CHECK (ledger IN ('plain', 'chained')),
+    ledger       text NOT NULL DEFAULT 'plain' CHECK (ledger IN ('plain', 'chained', 'contract')),
     status       text NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'PAID')),
     expires_at   timestamptz NOT NULL
 );
@@ -64,6 +65,7 @@ def reset() -> None:
         conn.execute("DROP TABLE IF EXISTS payments, payment_requests, device_keys")
     ledger.reset()
     chain.reset()
+    contract.reset()
     with ledger.connect() as conn:
         conn.execute(SCHEMA)
 
@@ -185,7 +187,11 @@ def pay(request_id: str, payer: str, idempotency_key: str, signature: str) -> di
                 raise RequestNotPayable(request_id)
             payee, amount_minor, ledger_name = claimed
 
-            # 4. Move the money on the request's ledger, in the same transaction.
-            transfer_id = LEDGERS[ledger_name].transfer_in(conn, payer, payee, amount_minor)
+            # 4. Move the money on the request's ledger. The request id goes along as
+            #    the transfer id: the contract ledger cannot join this database
+            #    transaction, so it uses the id to refuse ever paying a request twice.
+            transfer_id = LEDGERS[ledger_name].transfer_in(
+                conn, payer, payee, amount_minor, transfer_id=request_id
+            )
             conn.execute("UPDATE payments SET transfer_id = %s WHERE id = %s", (transfer_id, payment_id))
     return {"payment_id": payment_id, "transfer_id": transfer_id, "replayed": False}
