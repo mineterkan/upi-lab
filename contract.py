@@ -112,3 +112,16 @@ def verify() -> list[str]:
         if actual != expected:
             problems.append(f"{alias}: history says {expected}, balance says {actual}")
     return problems
+
+
+def head() -> tuple[int, str]:
+    """The latest (block number, block hash). Like chain.head(), it stands for the whole history."""
+    block = w3.eth.get_block("latest")
+    return block.number, block.hash.to_0x_hex()
+
+
+def hash_at(block_number: int) -> str | None:
+    try:
+        return w3.eth.get_block(block_number).hash.to_0x_hex()
+    except Exception:
+        return None

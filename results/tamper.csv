@@ -1,0 +1,7 @@
+ledger,attack,internal_check,witness
+plain,naive_edit,no check,no witness
+plain,full_rewrite,no check,no witness
+chained,naive_edit,DETECTED,missed
+chained,full_rewrite,missed,DETECTED
+contract,naive_edit,DETECTED,missed
+contract,full_rewrite,missed,DETECTED
