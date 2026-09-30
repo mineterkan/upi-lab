@@ -5,6 +5,7 @@ payment with their device key. The switch makes sure the signature is valid,
 that a request is paid at most once, and that retrying never charges twice.
 """
 
+import uuid
 import crypto
 import ledger
 
@@ -42,6 +43,10 @@ class RequestNotPayable(PaymentError):
     """Unknown, already paid, or expired."""
 
 
+class UnknownRequest(RequestNotPayable):
+    """No payment request with this id."""
+
+
 class InvalidSignature(PaymentError):
     """The payer's device did not sign exactly this payment."""
 
@@ -66,6 +71,14 @@ def register_key(alias: str, public_key: str) -> None:
         )
 
 
+def check_request_id(request_id: str) -> None:
+    """Reject anything that is not a UUID before it reaches the database."""
+    try:
+        uuid.UUID(request_id)
+    except ValueError:
+        raise UnknownRequest(request_id)
+
+
 def create_request(
     payee: str, amount_minor: int, reference: str = "", ttl_seconds: int = 300
 ) -> str:
@@ -81,13 +94,14 @@ def create_request(
 
 def get_request(request_id: str) -> dict:
     """What the customer's phone shows before they approve."""
+    check_request_id(request_id)
     with ledger.connect() as conn:
         row = conn.execute(
             "SELECT payee, amount_minor, reference FROM payment_requests WHERE id = %s",
             (request_id,),
         ).fetchone()
     if row is None:
-        raise RequestNotPayable("unknown request")
+        raise UnknownRequest(request_id)
     return {
         "id": request_id,
         "payee": row[0],
@@ -97,13 +111,14 @@ def get_request(request_id: str) -> dict:
 
 
 def request_status(request_id: str) -> str:
+    check_request_id(request_id)
     with ledger.connect() as conn:
         row = conn.execute(
             "SELECT status, expires_at <= now() FROM payment_requests WHERE id = %s",
             (request_id,),
         ).fetchone()
     if row is None:
-        raise RequestNotPayable("unknown request")
+        raise UnknownRequest(request_id)
     status, expired = row
     return "EXPIRED" if status == "PENDING" and expired else status
 
@@ -111,6 +126,7 @@ def request_status(request_id: str) -> str:
 def pay(request_id: str, payer: str, idempotency_key: str, signature: str) -> dict:
     """Pay a request with a signature from the payer's device. Calling again
     with the same idempotency_key returns the first result instead of paying again."""
+    check_request_id(request_id)
     with ledger.connect() as conn:
         with conn.transaction():
             # 1. Consent. Rebuild the instruction from the switch's own record of
@@ -121,7 +137,7 @@ def pay(request_id: str, payer: str, idempotency_key: str, signature: str) -> di
                 (request_id,),
             ).fetchone()
             if request is None:
-                raise RequestNotPayable("unknown request")
+                raise UnknownRequest(request_id)
             key_row = conn.execute(
                 "SELECT public_key FROM device_keys WHERE alias = %s", (payer,)
             ).fetchone()
