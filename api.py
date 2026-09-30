@@ -6,8 +6,8 @@ from urllib.parse import urlencode
 import segno
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import Response
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-
 import ledger
 import switch
 from money import format_sek, parse_sek
@@ -135,3 +135,8 @@ def pay(body: PaymentIn):
         )
     except Exception as e:
         fail(e)
+
+
+# --- web pages ----------------------------------------------------------------------
+# Mounted last, so every /api/... route above is matched first.
+app.mount("/", StaticFiles(directory="web", html=True), name="web")

@@ -1,0 +1,29 @@
+body {
+  margin: 0;
+  background: #f4f5f2;
+  color: #1b1f1d;
+  font: 16px/1.5 system-ui, -apple-system, sans-serif;
+}
+main { max-width: 640px; margin: 0 auto; padding: 24px 16px 48px; }
+h1 { font-size: 24px; margin: 0 0 4px; }
+.muted { color: #5f6a64; }
+.card { background: #fff; border: 1px solid #dde1dc; border-radius: 10px; padding: 18px; margin-top: 16px; }
+label { display: block; font-size: 13px; color: #5f6a64; margin: 10px 0 4px; }
+input, select, textarea {
+  width: 100%; box-sizing: border-box; padding: 9px 10px;
+  border: 1px solid #dde1dc; border-radius: 7px; font: inherit;
+}
+button {
+  margin-top: 12px; padding: 10px 16px; border: 0; border-radius: 7px;
+  background: #1f5f45; color: #fff; font: inherit; font-weight: 600; cursor: pointer;
+}
+button.secondary { background: #e7ebe6; color: #1b1f1d; }
+button:disabled { opacity: 0.5; cursor: default; }
+.big { font-size: 30px; font-weight: 700; }
+.mono { font-family: ui-monospace, monospace; font-size: 12px; word-break: break-all; white-space: pre-wrap; }
+.PAID, .SUCCESS { color: #1f7a4a; font-weight: 700; }
+.PENDING { color: #8a5a00; font-weight: 700; }
+.EXPIRED, .ERROR { color: #b3261e; font-weight: 700; }
+.hidden { display: none; }
+img.qr { width: 220px; height: 220px; display: block; margin: 12px 0; }
+nav a { margin-right: 12px; color: #1f5f45; }
